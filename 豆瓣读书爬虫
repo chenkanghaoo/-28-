@@ -1,0 +1,140 @@
+import requests
+from urllib.parse import unquote, quote
+from lxml import etree
+import json
+import time
+import xlwt
+import pandas as pd
+'''
+爬下读书标签下的所有图书，按评分标准依次存储，存储到excel中， 可方便大家筛选搜罗，比如筛选评价人数大于1000的高分书籍；
+可依据不同的主题存储到Excel不同的sheet，采用User-agent伪装成游览器进行爬取，并加入随机延时来更好的模仿用户行为；
+避免爬虫被封。
+本次只获取书籍名称和评分及评价人数相关数据
+'''
+#豆瓣读书爬虫
+class doubanSpider():
+
+    def __init__(self):
+        self.base_url = 'https://book.douban.com/'
+        self.headers ={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.116 Safari/537.36'
+        }
+        self.tag_titles = []               #获取所有书籍的分类名
+        self.tags_dict = {}               #获取tag_titles对应的所有子标签
+        self.tags2_dict = {}              #分类标签列表
+        self.tag_books = []              #获取该标签下所有的书籍信息
+        self.books = []                   #所有书籍信息
+
+
+    #获取数据
+    def get_tag_title_data(self):
+        response = requests.get(self.base_url, headers=self.headers)
+        html_data = etree.HTML(response.content)
+        tag_title = html_data.xpath('//*[@id="content"]/div/div[2]/ul/li//li[@class="tag_title"]/text()')
+        for tag in tag_title:
+            tag = str(tag).replace(" ", "")
+            tag = str(tag).replace("\n", "")
+            self.tag_titles.append(tag)
+        for i in range(1,7):
+            index = '//*[@id="content"]/div/div[2]/ul/li[{}]/ul/li//a/text()'.format(i)
+            tags = html_data.xpath(index)
+            yield tags[0:-1]         # 大标签的值，eg：['漫画', '推理', '绘本', '青春', '科幻', '言情', '奇幻', '武侠', '更多»']
+
+
+    def get_detail_page_data(self):
+        print(1)
+        values = self.get_tag_title_data()
+        for tags in values:
+            for tag in tags:
+                start = 0
+                keys = quote(str(tag))
+                title = '{}_books'.format(tag)
+                title = []  #重置
+                tags1_dict = {}    #重置
+                for i in range(0, 6):
+                    url = 'https://book.douban.com/tag/'+keys+'?start={}'.format(start)
+                    time.sleep(0.2)     #限制爬虫速度，避免被封IP
+                    response = requests.get(url, headers=self.headers)
+                    if response.status_code == 200:
+                        print("success")
+                        html_data = etree.HTML(response.content)
+                        try:
+                            li_list = html_data.xpath('//*[@id="subject_list"]/ul//li[@class="subject-item"]')
+                            for li in li_list:
+                                detail_book = {}
+                                detail_book["title"] = str(li.xpath('.//div[2]/h2/a/text()')[0]).replace("\n", "").replace(" ","")              #书籍书名
+                                detail_book["score"] = str(li.xpath('.//div[2]/div[2]/span[2]/text()')[0]).replace("\n", "").replace(" ","")          #书籍评分
+                                detail_book["people_nums"] = str(li.xpath('./div[2]/div[2]/span[3]/text()')[0]).replace("\n", "").replace(" ","").replace("(", "").replace("人评价)","")      #评价人数
+                                title.append(detail_book)
+                        except:
+                            print("Error")
+                    else:
+                        print("请求错误")
+                    start += 20
+                tags1_dict[tag] = title
+                tags1_dict = json.dumps(tags1_dict, ensure_ascii=False)
+                self.save_data(tags1_dict)
+
+    #创建excel表
+    def creat_excel(self):
+        # 创建excel 工作表
+        workbook = xlwt.Workbook(encoding="utf-8")
+        worksheet = workbook.add_sheet('sheet1', cell_overwrite_ok=True)
+        # 设置表头
+        worksheet.write(0, 0, label='title')
+        worksheet.write(0, 1, label='score')
+        worksheet.write(0, 2, label='people_nums')
+        # 变量用来循环时控制写入单元格，感觉有更好的表达方式
+        val1 = 1
+        val2 = 1
+        val3 = 1
+        return workbook, worksheet, val1, val2, val3
+
+    #对excel中的数据进行排序
+    def sort_data(self, name):
+        excel_name = 'D:\pycharm\豆瓣读书\{}.xlsx'.format(name)
+        stexcel = pd.read_excel(excel_name)
+        stexcel.sort_values(by=['people_nums'], inplace=True, ascending=[False])
+        pd.DataFrame(data=stexcel).to_excel(excel_name, index=False, header=True)  #保存对excel数据的修改
+
+
+    #解析数据
+    def parse_data(self):
+        with open("douban.json", "r", encoding="utf-8") as f:
+            for jsonline in f.readlines():
+                jsonline = json.loads(jsonline.encode("utf-8"))
+                tag_names = []
+                for tag_name in jsonline.keys():
+                    jsonline[tag_name].append(dict(tag_name=tag_name))                       #将分类标签添加进入
+                    workbook, worksheet, val1, val2, val3 = self.creat_excel()              #每遍历一次创建一个excel
+                    for book in range(len(jsonline[tag_name])):
+                        for key, value in jsonline[tag_name][book].items():
+                            if key == "title":
+                                worksheet.write(val1, 0, value)
+                                val1 += 1
+                            elif key == 'score':
+                                worksheet.write(val2, 1, value)
+                                val2 += 1
+                            elif key == "people_nums":
+                                worksheet.write(val3, 2, value)
+                                val3 += 1
+                            else:
+                                worksheet.write(val1, 0, value)
+                                val1 += 1
+                                workbook.save("{}.xlsx".format(value))
+                                self.sort_data(value)
+
+
+    #存储数据
+    def save_data(self,data):
+        print(data)
+        with open('douban.json', "a", encoding="utf-8") as f:
+            f.write(data + '\n')
+
+    #运行程序
+    def start(self):
+        self.get_detail_page_data()
+        self.parse_data()
+
+
+doubanSpider().start()
